@@ -336,6 +336,146 @@ def get_chart_details():
 	return details
 
 
+@frappe.whitelist()
+def get_moderator_admin_dashboard_metrics():
+	if frappe.session.user == "Guest":
+		frappe.throw(_("Please login to access dashboard metrics."), frappe.PermissionError)
+
+	roles = frappe.get_roles(frappe.session.user)
+	if not ("Moderator" in roles or "System Manager" in roles):
+		frappe.throw(_("Not permitted."), frappe.PermissionError)
+
+	return {
+		"platform_overview": _get_moderator_platform_overview(),
+		"learner_overview": _get_moderator_learner_overview(),
+		"certificate_overview": {
+			"issued_certificates": frappe.db.count("LMS Certificate") or 0,
+		},
+		"batch_overview": {
+			"total_batches": frappe.db.count("LMS Batch") or 0,
+		},
+		"review_queue": _get_moderator_review_queue(),
+		"upcoming_schedule": _get_moderator_upcoming_schedule(),
+	}
+
+
+def _get_moderator_platform_overview():
+	overview = {
+		"total_courses": frappe.db.count("LMS Course") or 0,
+		"published_courses": 0,
+		"unpublished_courses": 0,
+		"under_review_courses": 0,
+	}
+
+	if _doctype_has_fields("LMS Course", ["published"]):
+		overview["published_courses"] = frappe.db.count("LMS Course", {"published": 1}) or 0
+		overview["unpublished_courses"] = frappe.db.count("LMS Course", {"published": 0}) or 0
+
+	if _course_supports_under_review():
+		overview["under_review_courses"] = frappe.db.count("LMS Course", {"status": "Under Review"}) or 0
+
+	return overview
+
+
+def _get_moderator_learner_overview():
+	distinct_learners = frappe.db.sql(
+		"""select count(distinct member) from `tabLMS Enrollment`"""
+	)[0][0]
+	return {
+		"distinct_learners": distinct_learners or 0,
+		"enrollment_count": frappe.db.count("LMS Enrollment") or 0,
+	}
+
+
+def _get_moderator_review_queue():
+	if not _course_supports_under_review():
+		return []
+
+	return [
+		{
+			"title": course.title,
+			"status": course.status,
+			"modified": _dashboard_json_value(course.modified),
+		}
+		for course in frappe.get_all(
+			"LMS Course",
+			filters={"status": "Under Review"},
+			fields=["title", "status", "modified"],
+			order_by="modified desc",
+			limit=5,
+		)
+	]
+
+
+def _get_moderator_upcoming_schedule():
+	upcoming = []
+	today = getdate()
+
+	if _doctype_has_fields("LMS Batch", ["title", "start_date", "start_time", "end_time", "published"]):
+		for batch in frappe.get_all(
+			"LMS Batch",
+			filters={"start_date": [">=", today]},
+			fields=["title", "start_date", "start_time", "end_time", "published"],
+			order_by="start_date asc, start_time asc",
+			limit=5,
+		):
+			upcoming.append(
+				{
+					"kind": "batch",
+					"title": batch.title,
+					"date": _dashboard_json_value(batch.start_date),
+					"start_time": _dashboard_json_value(batch.start_time),
+					"end_time": _dashboard_json_value(batch.end_time),
+					"status": _("Published") if batch.published else _("Unpublished"),
+				}
+			)
+
+	if _doctype_has_fields(
+		"LMS Certificate Request",
+		["course_title", "date", "start_time", "end_time", "status"],
+	):
+		for request in frappe.get_all(
+			"LMS Certificate Request",
+			filters={"date": [">=", today], "status": "Upcoming"},
+			fields=["course_title", "date", "start_time", "end_time", "status"],
+			order_by="date asc, start_time asc",
+			limit=5,
+		):
+			upcoming.append(
+				{
+					"kind": "certificate_request",
+					"title": request.course_title,
+					"date": _dashboard_json_value(request.date),
+					"start_time": _dashboard_json_value(request.start_time),
+					"end_time": _dashboard_json_value(request.end_time),
+					"status": request.status,
+				}
+			)
+
+	return sorted(
+		upcoming,
+		key=lambda item: (item.get("date") or "", item.get("start_time") or ""),
+	)[:5]
+
+
+def _course_supports_under_review():
+	if not _doctype_has_fields("LMS Course", ["status"]):
+		return False
+
+	status_field = frappe.get_meta("LMS Course").get_field("status")
+	options = (status_field.options or "").splitlines() if status_field else []
+	return "Under Review" in options
+
+
+def _doctype_has_fields(doctype, fields):
+	meta = frappe.get_meta(doctype)
+	return all(meta.has_field(field) for field in fields)
+
+
+def _dashboard_json_value(value):
+	return str(value) if value is not None else None
+
+
 def get_file_info(file_url):
 	"""Get file info for the given file URL."""
 	file_info = frappe.db.get_value(
@@ -1233,7 +1373,7 @@ def mark_lesson_progress(course: str, chapter_number: int, lesson_number: int):
 
 @frappe.whitelist()
 def get_heatmap_data(member: str, base_days: int = 200):
-	if not (has_course_instructor_role() or has_moderator_role() or has_evaluator_role()):
+	if not _can_view_member_heatmap(member):
 		frappe.throw(_("You do not have permission to access heatmap data."), frappe.PermissionError)
 
 	base_date, start_date, number_of_days, days = calculate_date_ranges(base_days)
@@ -1254,6 +1394,59 @@ def get_heatmap_data(member: str, base_days: int = 200):
 		"total_activities": total_activities,
 		"weeks": weeks,
 	}
+
+
+def _can_view_member_heatmap(member: str) -> bool:
+	if frappe.session.user == "Guest":
+		return False
+
+	if member == frappe.session.user:
+		return True
+
+	if has_moderator_role():
+		return True
+
+	if has_course_instructor_role():
+		courses = frappe.get_all(
+			"Course Instructor",
+			{
+				"instructor": frappe.session.user,
+				"parenttype": "LMS Course",
+			},
+			pluck="parent",
+		)
+		if courses and frappe.db.exists("LMS Enrollment", {"member": member, "course": ["in", courses]}):
+			return True
+
+		batches = frappe.get_all(
+			"Course Instructor",
+			{
+				"instructor": frappe.session.user,
+				"parenttype": "LMS Batch",
+			},
+			pluck="parent",
+		)
+		if batches and frappe.db.exists("LMS Batch Enrollment", {"member": member, "batch": ["in", batches]}):
+			return True
+
+	if has_evaluator_role():
+		evaluator = frappe.db.get_value("Course Evaluator", {"evaluator": frappe.session.user}, "name")
+		if evaluator:
+			evaluator_batches = frappe.get_all(
+				"Batch Course",
+				{
+					"evaluator": evaluator,
+					"parenttype": "LMS Batch",
+				},
+				pluck="parent",
+			)
+			if evaluator_batches and frappe.db.exists(
+				"LMS Batch Enrollment",
+				{"member": member, "batch": ["in", evaluator_batches]},
+			):
+				return True
+
+	return False
 
 
 def calculate_date_ranges(base_days: int):
@@ -2742,6 +2935,135 @@ def get_my_latest_batches():
 	)
 
 
+@frappe.whitelist()
+def get_my_continue_learning():
+	if frappe.session.user == "Guest":
+		frappe.throw(_("Please login to continue learning."), frappe.PermissionError)
+
+	member = frappe.session.user
+	enrollments = frappe.get_all(
+		"LMS Enrollment",
+		filters={"member": member},
+		fields=["course", "current_lesson", "progress", "modified"],
+		order_by="modified desc",
+	)
+	if not enrollments:
+		return {
+			"course_name": "",
+			"course_title": "",
+			"progress": 0,
+			"current_lesson_title": "",
+			"is_exact_lesson": False,
+			"lesson_route": None,
+			"fallback_route": None,
+		}
+
+	selected = next((row for row in enrollments if flt(row.get("progress")) < 100), enrollments[0])
+	course = frappe.db.get_value("LMS Course", selected.course, ["name", "title"], as_dict=True)
+	if not course:
+		return {
+			"course_name": "",
+			"course_title": "",
+			"progress": 0,
+			"current_lesson_title": "",
+			"is_exact_lesson": False,
+			"lesson_route": None,
+			"fallback_route": None,
+		}
+
+	fallback_route = {
+		"name": "CourseDetail",
+		"params": {
+			"courseName": course.name,
+		},
+	}
+	lesson_details = _get_continue_learning_lesson(course.name, selected.get("current_lesson"))
+
+	return {
+		"course_name": course.name,
+		"course_title": course.title,
+		"progress": cint(flt(selected.get("progress"))),
+		"current_lesson_title": lesson_details.get("title") if lesson_details else "",
+		"is_exact_lesson": bool(lesson_details),
+		"lesson_route": lesson_details.get("route") if lesson_details else None,
+		"fallback_route": fallback_route,
+	}
+
+
+def _get_continue_learning_lesson(course_name: str, current_lesson: str | None = None):
+	if current_lesson:
+		lesson_details = _get_verified_continue_lesson(course_name, current_lesson)
+		if lesson_details:
+			return lesson_details
+
+	first_lesson = _get_first_course_lesson(course_name)
+	if first_lesson:
+		return _get_verified_continue_lesson(course_name, first_lesson)
+
+	return None
+
+
+def _get_first_course_lesson(course_name: str):
+	chapter_references = frappe.get_all(
+		"Chapter Reference",
+		filters={"parent": course_name},
+		fields=["chapter", "idx"],
+		order_by="idx asc",
+	)
+	for chapter in chapter_references:
+		lessons = frappe.get_all(
+			"Lesson Reference",
+			filters={"parent": chapter.chapter},
+			pluck="lesson",
+			order_by="idx asc",
+			limit=1,
+		)
+		if lessons:
+			return lessons[0]
+	return None
+
+
+def _get_verified_continue_lesson(course_name: str, lesson_name: str):
+	lesson = frappe.db.get_value(
+		"Course Lesson",
+		lesson_name,
+		["name", "title", "course"],
+		as_dict=True,
+	)
+	if not lesson or lesson.course != course_name:
+		return None
+
+	lesson_references = frappe.get_all(
+		"Lesson Reference",
+		filters={"lesson": lesson.name},
+		fields=["parent", "idx"],
+		order_by="idx asc",
+	)
+	for lesson_reference in lesson_references:
+		chapter_idx = frappe.db.get_value(
+			"Chapter Reference",
+			{
+				"parent": course_name,
+				"chapter": lesson_reference.parent,
+			},
+			"idx",
+		)
+		if chapter_idx:
+			return {
+				"title": lesson.title,
+				"route": {
+					"name": "Lesson",
+					"params": {
+						"courseName": course_name,
+						"chapterNumber": str(chapter_idx),
+						"lessonNumber": str(lesson_reference.idx),
+					},
+				},
+			}
+
+	return None
+
+
 def get_upcoming_batches():
 	return frappe.get_all(
 		"LMS Batch",
@@ -2764,9 +3086,13 @@ def delete_programming_exercise(exercise: str):
 
 @frappe.whitelist()
 def get_lesson_completion_stats(course: str):
-	roles = frappe.get_roles()
-	if "Course Creator" not in roles and "Moderator" not in roles:
-		frappe.throw(_("You do not have permission to access lesson completion stats."))
+	if frappe.session.user == "Guest":
+		frappe.throw(_("Please login to access lesson completion stats."), frappe.PermissionError)
+
+	if not can_modify_course(course):
+		frappe.throw(
+			_("You do not have permission to access lesson completion stats."), frappe.PermissionError
+		)
 
 	CourseProgress = frappe.qb.DocType("LMS Course Progress")
 	LessonReference = frappe.qb.DocType("Lesson Reference")

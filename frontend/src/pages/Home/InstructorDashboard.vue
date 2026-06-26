@@ -287,7 +287,7 @@
 								</div>
 								<div class="h-2 overflow-hidden rounded bg-surface-gray-2">
 									<div
-										class="h-full rounded bg-ink-gray-7"
+										class="h-full rounded bg-blue-500"
 										:style="{ width: `${getProgressWidth(course.completion_percentage)}%` }"
 									></div>
 								</div>

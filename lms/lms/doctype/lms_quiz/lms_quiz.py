@@ -20,6 +20,7 @@ from lms.lms.doctype.lms_question.lms_question import (
 	QUESTION_POSSIBILITY_FIELDS,
 )
 from lms.lms.utils import (
+	can_access_quiz,
 	generate_slug,
 )
 
@@ -107,6 +108,9 @@ def set_total_marks(questions: list) -> int:
 
 @frappe.whitelist()
 def submit_quiz(quiz: str, results: str | None = None):
+	if not can_access_quiz(quiz):
+		frappe.throw(_("You are not authorized to submit this quiz."), frappe.PermissionError)
+
 	results = json.loads(results) if results else []
 
 	quiz_details = frappe.db.get_value(

@@ -7,15 +7,35 @@ from frappe.desk.doctype.notification_log.notification_log import make_notificat
 from frappe.model.document import Document
 from frappe.utils import cint
 
+PRIVILEGED_ROLES = {"System Manager"}
+
 
 class LMSQuizSubmission(Document):
 	def validate(self):
+		self.enforce_member_ownership()
 		self.validate_if_max_attempts_exceeded()
 		self.validate_marks()
 		self.set_percentage()
 
 	def on_update(self):
 		self.notify_member()
+
+	def enforce_member_ownership(self):
+		is_privileged = bool(PRIVILEGED_ROLES & set(frappe.get_roles()))
+		if frappe.session.user == "Guest" and not is_privileged:
+			frappe.throw(_("You can only submit quizzes for your own account."), frappe.PermissionError)
+
+		if self.is_new():
+			if not is_privileged and self.member != frappe.session.user:
+				frappe.throw(_("You can only submit quizzes for your own account."), frappe.PermissionError)
+			return
+
+		stored_member = frappe.db.get_value(self.doctype, self.name, "member")
+		if stored_member != self.member:
+			frappe.throw(_("Quiz submission member cannot be changed."), frappe.PermissionError)
+
+		if not is_privileged and stored_member != frappe.session.user:
+			frappe.throw(_("You can only update your own quiz submissions."), frappe.PermissionError)
 
 	def validate_if_max_attempts_exceeded(self):
 		max_attempts = frappe.db.get_value("LMS Quiz", self.quiz, ["max_attempts"])

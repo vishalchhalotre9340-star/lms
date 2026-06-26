@@ -1400,8 +1400,8 @@ def get_quiz_with_questions(quiz: str) -> dict:
 		QUESTION_OPTION_FIELDS,
 	)
 
-	if not has_lms_role():
-		frappe.throw(_("You are not authorized to view this quiz."))
+	if not can_access_quiz(quiz):
+		frappe.throw(_("You are not authorized to view this quiz."), frappe.PermissionError)
 
 	quiz_doc = frappe.get_doc("LMS Quiz", quiz).as_dict()
 
@@ -1425,6 +1425,56 @@ def get_quiz_with_questions(quiz: str) -> dict:
 		questions_by_name = {row["name"]: row for row in rows}
 
 	return {"quiz": quiz_doc, "questions_by_name": questions_by_name}
+
+
+def can_access_quiz(quiz: str) -> bool:
+	if frappe.session.user == "Guest":
+		return False
+
+	quiz_details = frappe.db.get_value("LMS Quiz", quiz, ["name", "course", "lesson"], as_dict=True)
+	if not quiz_details:
+		return False
+
+	if has_moderator_role():
+		return True
+
+	if quiz_details.course:
+		if can_modify_course(quiz_details.course):
+			return True
+
+		if frappe.db.exists(
+			"LMS Enrollment",
+			{"member": frappe.session.user, "course": quiz_details.course},
+		):
+			return True
+
+	batches = frappe.get_all(
+		"LMS Assessment",
+		filters={
+			"assessment_type": "LMS Quiz",
+			"assessment_name": quiz_details.name,
+			"parenttype": "LMS Batch",
+		},
+		pluck="parent",
+	)
+	if not batches:
+		return False
+
+	if frappe.db.exists(
+		"LMS Batch Enrollment",
+		{"member": frappe.session.user, "batch": ["in", batches]},
+	):
+		return True
+
+	if has_evaluator_role() and quiz_details.course:
+		evaluator = frappe.db.get_value("Course Evaluator", {"evaluator": frappe.session.user}, "name")
+		if evaluator and frappe.db.exists(
+			"Batch Course",
+			{"parent": ["in", batches], "course": quiz_details.course, "evaluator": evaluator},
+		):
+			return True
+
+	return False
 
 
 @frappe.whitelist(allow_guest=True)
@@ -2463,13 +2513,13 @@ def validate_course_access(lesson: str):
 	if not frappe.db.exists("Course Lesson", lesson):
 		frappe.throw(_("The lesson does not exist."))
 
-	if has_moderator_role():
-		return
-
-	if has_course_instructor_role():
-		return
+	if frappe.session.user == "Guest":
+		frappe.throw(_("You do not have access to this course."))
 
 	course = frappe.db.get_value("Course Lesson", lesson, "course")
+	if can_modify_course(course):
+		return
+
 	enrollment_exists = frappe.db.exists("LMS Enrollment", {"member": frappe.session.user, "course": course})
 	if not enrollment_exists:
 		frappe.throw(_("You do not have access to this course."))

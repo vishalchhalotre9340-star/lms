@@ -14,11 +14,19 @@ const routes = [
 		path: '/student-dashboard',
 		name: 'StudentDashboard',
 		component: () => import('@/pages/Home/StudentDashboard.vue'),
+		meta: { requiredRoles: ['is_student'] },
 	},
 	{
 		path: '/instructor-dashboard',
 		name: 'InstructorDashboard',
 		component: () => import('@/pages/Home/InstructorDashboard.vue'),
+		meta: { requiredRoles: ['is_instructor', 'is_moderator'] },
+	},
+	{
+		path: '/moderator-admin-dashboard',
+		name: 'ModeratorAdminDashboard',
+		component: () => import('@/pages/Home/ModeratorAdminDashboard.vue'),
+		meta: { requiredRoles: ['is_moderator', 'is_system_manager'] },
 	},
 	{
 		path: '/courses',
@@ -257,10 +265,20 @@ let router = createRouter({
 	routes,
 })
 
+const hasRequiredRole = (user, requiredRoles = []) => {
+	return requiredRoles.some((role) => user?.[role])
+}
+
+const redirectToLogin = (to) => {
+	const redirectTo = encodeURIComponent(to.fullPath)
+	window.location.href = `/login?redirect-to=${redirectTo}`
+}
+
 router.beforeEach(async (to, from, next) => {
 	const { userResource } = usersStore()
 	let { isLoggedIn } = sessionStore()
 	const { settings } = useSettings()
+	const requiredRoles = to.meta.requiredRoles || []
 
 	try {
 		if (isLoggedIn) {
@@ -271,14 +289,24 @@ router.beforeEach(async (to, from, next) => {
 	}
 
 	if (!isLoggedIn) {
+		if (requiredRoles.length) {
+			redirectToLogin(to)
+			return
+		}
+
 		if (to.name == 'Home') router.push({ name: 'Courses' })
 
 		await settings.promise
 		if (!settings.data.allow_guest_access) {
-			window.location.href = '/login'
+			redirectToLogin(to)
 			return
 		}
 	}
+
+	if (requiredRoles.length && !hasRequiredRole(userResource.data, requiredRoles)) {
+		return next({ name: 'Home' })
+	}
+
 	return next()
 })
 
