@@ -673,8 +673,43 @@ watch(settingsStore.settings, () => {
 
 const updateSidebarLinks = () => {
 	sidebarLinks.value = getSidebarLinks()
+	addModeratorAdminDashboardLink()
 	updateSidebarLinksVisibility()
 	updateUnreadCount()
+}
+
+const addModeratorAdminDashboardLink = () => {
+	if (
+		!userResource.data?.is_moderator &&
+		!userResource.data?.is_system_manager
+	)
+		return
+
+	const learningLinks = sidebarLinks.value?.find(
+		(link) => link.label === 'Learning'
+	)
+	if (
+		!learningLinks ||
+		learningLinks.items.some(
+			(item) => item.to === 'ModeratorAdminDashboard'
+		)
+	)
+		return
+
+	const instructorDashboardIndex = learningLinks.items.findIndex(
+		(item) => item.to === 'InstructorDashboard'
+	)
+	const index =
+		instructorDashboardIndex === -1
+			? 1
+			: instructorDashboardIndex + 1
+
+	learningLinks.items.splice(index, 0, {
+		label: 'Moderator/Admin Dashboard',
+		icon: 'LayoutDashboard',
+		to: 'ModeratorAdminDashboard',
+		activeFor: ['ModeratorAdminDashboard'],
+	})
 }
 
 const redirectToWebsite = () => {

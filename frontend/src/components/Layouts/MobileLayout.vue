@@ -136,6 +136,7 @@ const addLink = (label, icon, to = '') => {
 const updateSidebarLinks = () => {
 	sidebarLinks.value = getSidebarLinks(true)
 	destructureSidebarLinks()
+	addModeratorAdminDashboardLink()
 	sidebarSettings.reload(
 		{},
 		{
@@ -163,6 +164,19 @@ const addAssignments = () => {
 
 const addProgrammingExercises = () => {
 	addLink('Programming Exercises', 'Code', 'ProgrammingExercises')
+}
+
+const addModeratorAdminDashboardLink = () => {
+	if (
+		!userResource.data?.is_moderator &&
+		!userResource.data?.is_system_manager
+	)
+		return
+	addLink(
+		'Moderator/Admin Dashboard',
+		'LayoutDashboard',
+		'ModeratorAdminDashboard'
+	)
 }
 
 const addPrograms = async () => {
